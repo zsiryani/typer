@@ -76,3 +76,21 @@ By default, AutoTyper is configured to recognize:
 * **Cisco Webex** (`com.cisco.webexmeetingsapp`)
 
 You can add additional target bundle identifiers in `TyperLogic.swift` under the `targetBundleIDs` set.
+
+## Command Line Build (`xcodebuild`)
+
+You can build the project from Terminal using `xcodebuild`:
+
+```bash
+# Clone and enter directory
+cd /path/to/typer
+
+# Build Release binary to a local ./build folder
+xcodebuild build \
+  -project typer.xcodeproj \
+  -scheme typer \
+  -configuration Release \
+  -derivedDataPath ./build
+
+# Launch the built application
+open ./build/Build/Products/Release/typer.app
