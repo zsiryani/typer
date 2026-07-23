@@ -68,24 +68,50 @@ struct typer: App {
 class TyperLogic: ObservableObject {
     
     @Published var isAccessibilityGranted: Bool = false
+    @Published var runningApps: [NSRunningApplication] = []
     
     let targetBundleIDs: Set<String> = [
-        "com.microsoft.VSCode",      // Visual Studio Code
-        "us.zoom.xos",               // Zoom
-        "com.microsoft.teams2",      // New Microsoft Teams
-        "com.microsoft.teams",       // Classic Microsoft Teams
-        "com.cisco.webexmeetingsapp" // Webex
+        "com.microsoft.VSCode",        // Visual Studio Code
+        "com.microsoft.VSCodeInsiders",// VS Code Insiders
+        "us.zoom.xos",                 // Zoom
+        "com.microsoft.teams2",        // New Microsoft Teams
+        "com.microsoft.teams",         // Classic Microsoft Teams
+        "com.cisco.webexmeetingsapp"   // Webex
     ]
 
+    private var globalMonitor: Any?
+    
     init() {
         checkAccessibilityPermissions()
-        setupGlobalHotkey()
+        updateRunningApps()
+        setupWorkspaceObervers()
     }
-
-    var runningApps: [NSRunningApplication] {
-        NSWorkspace.shared.runningApplications.filter { app in
+    
+    deinit {
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+    
+    func updateRunningApps() {
+        let activeTargets = NSWorkspace.shared.runningApplications.filter { app in
             guard let bundleID = app.bundleIdentifier else { return false }
             return targetBundleIDs.contains(bundleID)
+        }
+        
+        DispatchQueue.main.async {
+            self.runningApps = activeTargets
+        }
+    }
+    
+    private func setupWorkspaceObervers() {
+        let center = NSWorkspace.shared.notificationCenter
+        
+        center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.updateRunningApps()
+        }
+        center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.updateRunningApps()
         }
     }
 
@@ -94,6 +120,9 @@ class TyperLogic: ObservableObject {
         let trusted = AXIsProcessTrusted()
         DispatchQueue.main.async {
             self.isAccessibilityGranted = trusted
+            if trusted {
+                self.setupGlobalHotkey()
+            }
         }
     }
 
@@ -104,11 +133,18 @@ class TyperLogic: ObservableObject {
     }
 
     // MARK: - Global Hotkey
-    private func setupGlobalHotkey() {
-        NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+    func setupGlobalHotkey() {
+        if let monitor = globalMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMonitor = nil
+        }
+
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let isVKey = event.keyCode == 9 // 'V' key
-            let hasControl = event.modifierFlags.contains(.control)
-            let hasOption = event.modifierFlags.contains(.option)
+
+            let hasControl = flags.contains(.control)
+            let hasOption = flags.contains(.option)
 
             if isVKey && hasControl && hasOption {
                 DispatchQueue.main.async {
@@ -124,15 +160,14 @@ class TyperLogic: ObservableObject {
         if let bundleID = activeApp.bundleIdentifier, targetBundleIDs.contains(bundleID) {
             typeClipboard(into: activeApp)
         } else {
-            // Beep if hotkey was hit while in an unsupported app
             NSSound.beep()
+            print("⚠️ Hotkey pressed in non-target app: \(activeApp.localizedName ?? "Unknown") [\(activeApp.bundleIdentifier ?? "No Bundle ID")]")
         }
     }
 
-    // MARK: - Core Typing Engine
-    
+    // MARK: - Core Typing Engine with Preview Dialog
     func typeClipboard(into app: NSRunningApplication) {
-        // Verify Accessibility permission
+        // 1. Verify Accessibility permission
         if !AXIsProcessTrusted() {
             checkAccessibilityPermissions()
             openAccessibilitySettings()
@@ -140,11 +175,39 @@ class TyperLogic: ObservableObject {
             return
         }
 
+        // 2. Read clipboard content
         guard let rawText = NSPasteboard.general.string(forType: .string), !rawText.isEmpty else {
             NSSound.beep()
             return
         }
 
+        // 3. Format preview text for confirmation dialog
+        let maxPreviewLength = 300
+        let previewContent: String
+        if rawText.count > maxPreviewLength {
+            previewContent = String(rawText.prefix(maxPreviewLength)) + "\n\n... [Truncated: \(rawText.count) characters total]"
+        } else {
+            previewContent = rawText
+        }
+
+        // 4. Present Modal Preview Alert
+        let alert = NSAlert()
+        alert.messageText = "Confirm AutoType into \(app.localizedName ?? "Target App")"
+        alert.informativeText = "Are you sure you want to type the following clipboard content?\n\n\"\(previewContent)\""
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Type Text") // Default button (Enter / Return)
+        alert.addButton(withTitle: "Cancel")    // Cancel button (Esc)
+
+        // Bring dialog to front of all windows
+        NSApp.activate()
+        
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            print("❌ AutoType cancelled by user.")
+            return
+        }
+
+        // 5. Proceed with typing if confirmed
         let targetPID = app.processIdentifier
 
         // Normalize line endings
@@ -152,20 +215,19 @@ class TyperLogic: ObservableObject {
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
 
-        // 1. Force target app to front
+        // Activate target application window
         app.activate()
 
-        // 2. Type characters asynchronously
+        // Type characters asynchronously
         DispatchQueue.global(qos: .userInitiated).async {
-            // Wait 300ms for window focus animation to complete
+            // Wait 300ms for target window focus animation to complete
             Thread.sleep(forTimeInterval: 0.3)
 
             let source = CGEventSource(stateID: .hidSystemState)
 
             for char in clipboardText.utf16 {
                 
-                // --- FOCUS SAFETY SWITCH ---
-                // If user clicks another window/app mid-typing, STOP IMMEDIATELY.
+                // FOCUS SAFETY SWITCH: Stop typing if target loses focus mid-way
                 guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
                     print("⚠️ Focus switched away from target. Auto-typing cancelled.")
                     return
