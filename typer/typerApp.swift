@@ -53,6 +53,11 @@ struct typer: App {
 
             Divider()
 
+            // 3. Settings Options
+            Toggle("Preview before typing", isOn: $typerLogic.previewBeforeType)
+
+            Divider()
+
             Button("Check Permissions Again") {
                 typerLogic.checkAccessibilityPermissions()
             }
@@ -70,13 +75,21 @@ class TyperLogic: ObservableObject {
     @Published var isAccessibilityGranted: Bool = false
     @Published var runningApps: [NSRunningApplication] = []
     
+    // Default to TRUE; persist choice across app restarts using UserDefaults
+    @Published var previewBeforeType: Bool = UserDefaults.standard.object(forKey: "previewBeforeType") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(previewBeforeType, forKey: "previewBeforeType")
+        }
+    }
+    
     let targetBundleIDs: Set<String> = [
-        "com.microsoft.VSCode",        // Visual Studio Code
-        "com.microsoft.VSCodeInsiders",// VS Code Insiders
-        "us.zoom.xos",                 // Zoom
-        "com.microsoft.teams2",        // New Microsoft Teams
-        "com.microsoft.teams",         // Classic Microsoft Teams
-        "com.cisco.webexmeetingsapp"   // Webex
+        "com.microsoft.VSCode",          // Visual Studio Code
+        "com.microsoft.VSCodeInsiders",  // VS Code Insiders
+        "com.todesktop.230313m09beyd92",  // Cursor IDE
+        "us.zoom.xos",                   // Zoom
+        "com.microsoft.teams2",          // New Microsoft Teams
+        "com.microsoft.teams",           // Classic Microsoft Teams
+        "com.cisco.webexmeetingsapp"     // Webex
     ]
 
     private var globalMonitor: Any?
@@ -165,7 +178,7 @@ class TyperLogic: ObservableObject {
         }
     }
 
-    // MARK: - Core Typing Engine with Preview Dialog
+    // MARK: - Core Typing Engine
     func typeClipboard(into app: NSRunningApplication) {
         // 1. Verify Accessibility permission
         if !AXIsProcessTrusted() {
@@ -181,39 +194,61 @@ class TyperLogic: ObservableObject {
             return
         }
 
-        // 3. Format preview text for confirmation dialog
-        let maxPreviewLength = 300
-        let previewContent: String
-        if rawText.count > maxPreviewLength {
-            previewContent = String(rawText.prefix(maxPreviewLength)) + "\n\n... [Truncated: \(rawText.count) characters total]"
-        } else {
-            previewContent = rawText
+        // 3. Show Preview Dialog IF Enabled
+        if previewBeforeType {
+            let alert = NSAlert()
+            alert.messageText = "Confirm AutoType into \(app.localizedName ?? "Target App")"
+            alert.informativeText = "Review the text below before typing (\(rawText.count) characters):"
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Type Text") // Default button (Enter)
+            alert.addButton(withTitle: "Cancel")    // Cancel button (Esc)
+
+            // --- Construct Scrollable Text Area ---
+            let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 480, height: 220))
+            scrollView.hasVerticalScroller = true
+            scrollView.hasHorizontalScroller = true
+            scrollView.autohidesScrollers = false
+            scrollView.borderType = .bezelBorder
+
+            let contentSize = scrollView.contentSize
+            let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height))
+            textView.minSize = NSSize(width: 0.0, height: contentSize.height)
+            textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
+            textView.textContainer?.containerSize = NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+            textView.textContainer?.widthTracksTextView = true
+            
+            // Set monospaced font & text content
+            textView.string = rawText
+            textView.isEditable = false
+            textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+            scrollView.documentView = textView
+            alert.accessoryView = scrollView
+
+            // Bring dialog to front of all windows
+            NSApp.activate()
+            
+            let response = alert.runModal()
+            guard response == .alertFirstButtonReturn else {
+                print("❌ AutoType cancelled by user.")
+                return
+            }
         }
 
-        // 4. Present Modal Preview Alert
-        let alert = NSAlert()
-        alert.messageText = "Confirm AutoType into \(app.localizedName ?? "Target App")"
-        alert.informativeText = "Are you sure you want to type the following clipboard content?\n\n\"\(previewContent)\""
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Type Text") // Default button (Enter / Return)
-        alert.addButton(withTitle: "Cancel")    // Cancel button (Esc)
-
-        // Bring dialog to front of all windows
-        NSApp.activate()
-        
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else {
-            print("❌ AutoType cancelled by user.")
-            return
-        }
-
-        // 5. Proceed with typing if confirmed
-        let targetPID = app.processIdentifier
-
+        // 4. Proceed with typing execution
         // Normalize line endings
         let clipboardText = rawText
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+
+        // Set of UTF-16 code points that require Shift key on standard US keyboards
+        let shiftedSymbols: Set<UInt16> = [
+            126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, // ~ ! @ # $ % ^ & * ( ) _ +
+            123, 125, 124, 58, 34, 60, 62, 63                   // { } | : " < > ?
+        ]
 
         // Activate target application window
         app.activate()
@@ -223,36 +258,58 @@ class TyperLogic: ObservableObject {
             // Wait 300ms for target window focus animation to complete
             Thread.sleep(forTimeInterval: 0.3)
 
-            let source = CGEventSource(stateID: .hidSystemState)
+            // CRITICAL: Use .privateState so physical modifier keys (Ctrl/Opt/Cmd) do NOT leak into virtual keypresses
+            guard let source = CGEventSource(stateID: .privateState) else { return }
 
             for char in clipboardText.utf16 {
                 
-                // FOCUS SAFETY SWITCH: Stop typing if target loses focus mid-way
-                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID else {
-                    print("⚠️ Focus switched away from target. Auto-typing cancelled.")
+                // STRICT FOCUS SAFETY SWITCH: Stop typing if target loses active window status
+                guard app.isActive else {
+                    print("⚠️ Focus switched away from target app. Auto-typing cancelled immediately.")
                     return
                 }
 
                 if char == 10 {
-                    // --- NEWLINE / ENTER (\n) ---
+                    // --- NEWLINE / ENTER (\n) -> Keycode 36 ---
                     if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
                        let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) {
+                        eventDown.flags = []
+                        eventUp.flags = []
                         eventDown.post(tap: .cghidEventTap)
                         eventUp.post(tap: .cghidEventTap)
                     }
                 } else if char == 9 {
-                    // --- TAB (\t) ---
+                    // --- TAB (\t) -> Keycode 48 ---
                     if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 48, keyDown: true),
                        let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 48, keyDown: false) {
+                        eventDown.flags = []
+                        eventUp.flags = []
+                        eventDown.post(tap: .cghidEventTap)
+                        eventUp.post(tap: .cghidEventTap)
+                    }
+                } else if char == 32 {
+                    // --- SPACE ( ) -> Keycode 49 ---
+                    if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 49, keyDown: true),
+                       let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 49, keyDown: false) {
+                        eventDown.flags = []
+                        eventUp.flags = []
                         eventDown.post(tap: .cghidEventTap)
                         eventUp.post(tap: .cghidEventTap)
                     }
                 } else {
                     // --- REGULAR UNICODE CHARACTERS ---
                     var unichar = char
+                    let isUppercase = (char >= 65 && char <= 90) // 'A'...'Z'
+                    let needsShift = isUppercase || shiftedSymbols.contains(char)
+
                     if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
                        let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
                         
+                        // Explicitly set or clear shift flag
+                        let targetFlags: CGEventFlags = needsShift ? .maskShift : []
+                        eventDown.flags = targetFlags
+                        eventUp.flags = targetFlags
+
                         eventDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
                         eventUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
 
