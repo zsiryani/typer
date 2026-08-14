@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "typer",
     platforms: [
-        .macOS(.v13) // Required for SwiftUI MenuBarExtra
+        .macOS(.v13) // macOS Ventura or later (required for MenuBarExtra)
     ],
     products: [
         .executable(
@@ -12,12 +12,13 @@ let package = Package(
             targets: ["typer"]
         )
     ],
-    dependencies: [],
     targets: [
         .executableTarget(
             name: "typer",
-            dependencies: [],
-            path: "Sources" // Points to your source files directory
+            path: "typer", // Points directly to your typer/ subfolder
+            resources: [
+                .process("Assets.xcassets") // Bundles AppIcon and AccentColor
+            ]
         )
     ]
 )

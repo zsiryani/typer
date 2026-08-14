@@ -229,7 +229,7 @@ class TyperLogic: ObservableObject {
             alert.accessoryView = scrollView
 
             // Bring dialog to front of all windows
-            NSApp.activate()
+            NSApp.activate(ignoringOtherApps: true)
             
             let response = alert.runModal()
             guard response == .alertFirstButtonReturn else {
