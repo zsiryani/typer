@@ -1,22 +1,84 @@
-# This workflow will build a Swift project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-swift
-
 name: Swift
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, '1.0.1']
+    tags: ['v*']
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
-
     runs-on: macos-latest
+    timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-#    - name: Run tests
-#      run: swift test -v
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build universal macOS app
+        run: |
+          xcodebuild build \
+            -project typer.xcodeproj \
+            -scheme typer \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build \
+            'ARCHS=arm64 x86_64' \
+            ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
+            SWIFT_DEFAULT_ACTOR_ISOLATION=nonisolated \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Sign and package app
+        run: |
+          app_path=build/Build/Products/Release/typer.app
+          test -x "$app_path/Contents/MacOS/typer"
+          lipo -verify_arch arm64 x86_64 "$app_path/Contents/MacOS/typer"
+          codesign --force --sign - "$app_path"
+          codesign --verify --strict "$app_path"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "$app_path" dist/typer-macos-universal.zip
+          cd dist
+          shasum -a 256 typer-macos-universal.zip > typer-macos-universal.zip.sha256
+
+      - name: Upload downloadable app
+        uses: actions/upload-artifact@v7
+        with:
+          name: typer-macos-universal
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: typer-macos-universal
+          path: dist
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "$RELEASE_TAG"
+          fi

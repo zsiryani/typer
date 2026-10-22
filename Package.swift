@@ -19,6 +19,7 @@ let package = Package(
             resources: [
                 .process("Assets.xcassets") // Bundles AppIcon and AccentColor
             ]
-        )
+        ),
+        .testTarget(name: "typerTests", dependencies: ["typer"])
     ]
 )
