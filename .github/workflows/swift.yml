@@ -42,7 +42,9 @@ jobs:
         run: |
           app_path=build/Build/Products/Release/typer.app
           test -x "$app_path/Contents/MacOS/typer"
-          lipo -verify_arch arm64 x86_64 "$app_path/Contents/MacOS/typer"
+          for architecture in arm64 x86_64; do
+            lipo "$app_path/Contents/MacOS/typer" -verify_arch "$architecture"
+          done
           codesign --force --sign - "$app_path"
           codesign --verify --strict "$app_path"
           mkdir -p dist
