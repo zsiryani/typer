@@ -31,7 +31,9 @@ AutoTyper acts as a virtual human keyboard, taking your local clipboard contents
 
 After a successful build, open **GitHub → Actions → Swift → the workflow run → Artifacts** and download `typer-macos-universal`. Extract the artifact, then extract `typer-macos-universal.zip` to get `typer.app`. The app supports Apple Silicon and Intel Macs running macOS 14 or newer. Builds use ad-hoc signing and are not Apple-notarized; macOS may require approval in **System Settings → Privacy & Security** before opening the app. Grant Accessibility permission as described below.
 
-The workflow runs on pushes to `main` or `1.0.1`, pull requests targeting `main`, and manual runs. To publish a GitHub Release with the app ZIP and SHA-256 checksum, push a version tag after committing the workflow and app changes:
+The workflow runs on pushes to `main` or `1.0.1`, pull requests targeting `main`, and manual runs. Every successful push to either branch also uploads the app ZIP and SHA-256 checksum to a rolling prerelease on the **Releases** page: `build-main` or `build-1.0.1`. Each push replaces that branch's downloadable assets and updates the release notes with the built commit. The rolling release tag stays at the commit that first created it; use the commit in the release notes to identify the current download. Pull requests and manual runs upload Actions artifacts only.
+
+To publish a versioned GitHub Release, push a version tag after committing the workflow and app changes:
 
 ```bash
 git tag v1.0.1
