@@ -11,8 +11,8 @@ AutoTyper acts as a virtual human keyboard, taking your local clipboard contents
 * **Menu Bar Status Item:** Lives unobtrusively in your macOS status bar (`MenuBarExtra`).
 * **Global Hotkey Support:** Trigger typing instantly with **`Control` + `Option` + `V`** (`⌃ ⌥ V`).
 * **Focus Safety Switch:** Automatically cancels typing the exact millisecond you switch windows or click away, preventing text leakage into unrelated applications.
-* **Native Keycode Injection:** Correctly handles line breaks (`\n` -> Return keycode `36`) and tabs (`\t` -> Tab keycode `48`) rather than dropping raw characters.
-* **Throttled Delivery:** Automatically throttles keystrokes (20ms delay) to ensure remote desktop connection protocols do not drop characters due to latency.
+* **Native Keycode Injection:** Uses US physical keycodes for printable ASCII, Return, and Tab, with explicit Shift press/release events for uppercase letters and shifted symbols.
+* **Throttled Delivery:** Spaces key and modifier transitions by 10ms, with another 20ms between characters, to give remote sessions time to process events.
 * **Smart App Targeting:** Automatically detects and filters active remote desktop/meeting apps (Zoom, Teams, Webex, VS Code).
 
 ---
@@ -26,6 +26,21 @@ AutoTyper acts as a virtual human keyboard, taking your local clipboard contents
 ---
 
 ## Build & Setup Instructions
+
+### Download a CI build
+
+After a successful build, open **GitHub → Actions → Swift → the workflow run → Artifacts** and download `typer-macos-universal`. Extract the artifact, then extract `typer-macos-universal.zip` to get `typer.app`. The app supports Apple Silicon and Intel Macs running macOS 14 or newer. Builds use ad-hoc signing and are not Apple-notarized; macOS may require approval in **System Settings → Privacy & Security** before opening the app. Grant Accessibility permission as described below.
+
+The workflow runs on pushes to `main` or `1.0.1`, pull requests targeting `main`, and manual runs. Every successful push to either branch also uploads the app ZIP and SHA-256 checksum to a rolling prerelease on the **Releases** page: `build-main` or `build-1.0.1`. Each push replaces that branch's downloadable assets and updates the release notes with the built commit. The rolling release tag stays at the commit that first created it; use the commit in the release notes to identify the current download. Pull requests and manual runs upload Actions artifacts only.
+
+To publish a versioned GitHub Release, push a version tag after committing the workflow and app changes:
+
+```bash
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+Version tags matching `v*` build and test the app before publishing. Re-running a tag build replaces that release's matching assets.
 
 ### 1. Clone & Open Project
 1. Clone or download this repository.
@@ -64,6 +79,10 @@ Because AutoTyper injects low-level system keyboard events (`CGEvent`) and liste
    * Click the **AutoTyper** menu bar icon (`keyboard`) and select your target application from the drop-down menu.
 4. AutoTyper will bring the target window to the front and type out your clipboard contents.
 
+For remote typing, select **English (US)** as the active input layout on the remote computer. Physical key events are interpreted using that computer's layout. Non-ASCII characters retain Unicode event delivery for compatible local apps; remote apps may not forward that text correctly. Only one typing run can be active at a time.
+
+To check a remote session, type `-D | \\ { [ } ] ABC xyz !@#$%^&*()_+` into an empty text editor and compare the result. Automated tests check the key mapping, Shift event order, and release of held keys when focus changes; they do not exercise Zoom forwarding.
+
 ---
 
 ## Target Applications
@@ -94,3 +113,4 @@ xcodebuild build \
 
 # Launch the built application
 open ./build/Build/Products/Release/typer.app
+```

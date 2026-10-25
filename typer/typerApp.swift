@@ -9,7 +9,7 @@ struct typer: App {
     @StateObject private var typerLogic = TyperLogic()
 
     var body: some Scene {
-        MenuBarExtra("AutoTyper", systemImage: "keyboard") {
+        MenuBarExtra("AutoTyper", image: "MenuBarIcon") {
             
             // 1. Accessibility Status Banner
             if !typerLogic.isAccessibilityGranted {
@@ -93,6 +93,8 @@ class TyperLogic: ObservableObject {
     ]
 
     private var globalMonitor: Any?
+    private let typingQueue = DispatchQueue(label: "AutoTyper.typing", qos: .userInitiated)
+    private var isTyping = false
     
     init() {
         checkAccessibilityPermissions()
@@ -180,6 +182,11 @@ class TyperLogic: ObservableObject {
 
     // MARK: - Core Typing Engine
     func typeClipboard(into app: NSRunningApplication) {
+        guard !isTyping else {
+            NSSound.beep()
+            return
+        }
+
         // 1. Verify Accessibility permission
         if !AXIsProcessTrusted() {
             checkAccessibilityPermissions()
@@ -244,81 +251,25 @@ class TyperLogic: ObservableObject {
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
 
-        // Set of UTF-16 code points that require Shift key on standard US keyboards
-        let shiftedSymbols: Set<UInt16> = [
-            126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, // ~ ! @ # $ % ^ & * ( ) _ +
-            123, 125, 124, 58, 34, 60, 62, 63                   // { } | : " < > ?
-        ]
-
-        // Activate target application window
+        // A modal preview can process another trigger while it is open.
+        guard !isTyping else { return }
+        isTyping = true
         app.activate()
 
-        // Type characters asynchronously
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Wait 300ms for target window focus animation to complete
+        typingQueue.async {
+            defer {
+                DispatchQueue.main.async { self.isTyping = false }
+            }
+            // Allow the target window to activate before delivering events.
             Thread.sleep(forTimeInterval: 0.3)
-
-            // CRITICAL: Use .privateState so physical modifier keys (Ctrl/Opt/Cmd) do NOT leak into virtual keypresses
             guard let source = CGEventSource(stateID: .privateState) else { return }
 
-            for char in clipboardText.utf16 {
-                
-                // STRICT FOCUS SAFETY SWITCH: Stop typing if target loses active window status
-                guard app.isActive else {
-                    print("⚠️ Focus switched away from target app. Auto-typing cancelled immediately.")
+            for scalar in clipboardText.unicodeScalars {
+                guard let input = KeyboardInput(scalar: scalar, source: source),
+                      input.send(shouldContinue: { app.isActive }) else {
+                    print("Auto-typing stopped: target lost focus or a keyboard event could not be created.")
                     return
                 }
-
-                if char == 10 {
-                    // --- NEWLINE / ENTER (\n) -> Keycode 36 ---
-                    if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
-                       let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false) {
-                        eventDown.flags = []
-                        eventUp.flags = []
-                        eventDown.post(tap: .cghidEventTap)
-                        eventUp.post(tap: .cghidEventTap)
-                    }
-                } else if char == 9 {
-                    // --- TAB (\t) -> Keycode 48 ---
-                    if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 48, keyDown: true),
-                       let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 48, keyDown: false) {
-                        eventDown.flags = []
-                        eventUp.flags = []
-                        eventDown.post(tap: .cghidEventTap)
-                        eventUp.post(tap: .cghidEventTap)
-                    }
-                } else if char == 32 {
-                    // --- SPACE ( ) -> Keycode 49 ---
-                    if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 49, keyDown: true),
-                       let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 49, keyDown: false) {
-                        eventDown.flags = []
-                        eventUp.flags = []
-                        eventDown.post(tap: .cghidEventTap)
-                        eventUp.post(tap: .cghidEventTap)
-                    }
-                } else {
-                    // --- REGULAR UNICODE CHARACTERS ---
-                    var unichar = char
-                    let isUppercase = (char >= 65 && char <= 90) // 'A'...'Z'
-                    let needsShift = isUppercase || shiftedSymbols.contains(char)
-
-                    if let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                       let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                        
-                        // Explicitly set or clear shift flag
-                        let targetFlags: CGEventFlags = needsShift ? .maskShift : []
-                        eventDown.flags = targetFlags
-                        eventUp.flags = targetFlags
-
-                        eventDown.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
-                        eventUp.keyboardSetUnicodeString(stringLength: 1, unicodeString: &unichar)
-
-                        eventDown.post(tap: .cghidEventTap)
-                        eventUp.post(tap: .cghidEventTap)
-                    }
-                }
-
-                // 20ms throttle delay per character
                 Thread.sleep(forTimeInterval: 0.02)
             }
         }
